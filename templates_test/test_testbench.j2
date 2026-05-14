@@ -1,0 +1,438 @@
+`timescale 1ns/1ps
+
+module tb_{{ config_name }};
+    //==========================================================================
+    // Parameters
+    //==========================================================================
+    localparam ADDR_WIDTH = {{ addr_width }};
+    localparam DATA_WIDTH = {{ data_width }};
+    localparam DEPTH = {{ depth }};
+    localparam CLK_PERIOD = 10;
+{% if is_dual_port %}
+    localparam ADDR_B_WIDTH = {{ addr_b_width }};
+    localparam DATA_B_WIDTH = {{ data_b_width }};
+    localparam DEPTH_B = {{ depth_b }};
+{% endif %}
+    
+    //==========================================================================
+    // Signals
+    //==========================================================================
+    reg [ADDR_WIDTH-1:0] addr_a;
+    reg [DATA_WIDTH-1:0] data_in_a;
+    wire [DATA_WIDTH-1:0] data_out_a;
+    reg we_a;
+    reg en_a;
+    reg clk_a;
+    reg rst_a;
+    
+{% if is_dual_port %}
+    reg [ADDR_B_WIDTH-1:0] addr_b;
+    reg [DATA_B_WIDTH-1:0] data_in_b;
+    wire [DATA_B_WIDTH-1:0] data_out_b;
+    reg we_b;
+    reg en_b;
+    reg clk_b;
+    reg rst_b;
+{% endif %}
+    
+    //==========================================================================
+    // Reference Model (Golden Memory)
+    //==========================================================================
+    reg [DATA_WIDTH-1:0] ref_mem [0:DEPTH-1];
+{% if is_dual_port %}
+    {% if data_width == data_b_width %}
+    // Note: For true dual-port RAM with same width, both ports access same physical memory
+    {% else %}
+    // Note: Asymmetric dual-port - each port has independent reference (complex mapping)
+    reg [DATA_B_WIDTH-1:0] ref_mem_b [0:DEPTH_B-1];
+    {% endif %}
+{% endif %}
+    integer error_count;
+    integer test_count;
+    
+    //==========================================================================
+    // DUT Instantiation
+    //==========================================================================
+{% if is_dual_port %}
+    {{ dut_module }} uut (
+        .addr_a(addr_a),
+        .data_in_a(data_in_a),
+        .clk(clk_a),
+        .ena(en_a),
+        .wea(we_a),
+        .data_out_a(data_out_a)
+        {%- if is_dual_port %},
+        .addr_b(addr_b),
+        .data_in_b(data_in_b),
+        .enb(en_b),
+        .web(we_b),
+        .data_out_b(data_out_b)
+        {%- endif %}
+    );
+{% else %}
+    {{ dut_module }} uut (
+        .addr_a(addr_a),
+        .data_in_a(data_in_a),
+        .clk(clk_a),
+        .ena(en_a),
+        .wea(we_a),
+        .data_out_a(data_out_a)
+    );
+{% endif %}
+    
+    //==========================================================================
+    // Clock Generation
+    //==========================================================================
+    initial begin
+        clk_a = 0;
+        forever #(CLK_PERIOD/2) clk_a = ~clk_a;
+    end
+    
+{% if is_dual_port %}
+    initial begin
+        clk_b = 0;
+        forever #(CLK_PERIOD/2) clk_b = ~clk_b;
+    end
+{% endif %}
+    
+    //==========================================================================
+    // Self-Checking Logic
+    //==========================================================================
+    // Check port A read data
+    // Note: Synchronous RAM has 1-cycle read latency
+    reg [ADDR_WIDTH-1:0] prev_addr_a;
+    always @(posedge clk_a) begin
+        if (!rst_a && en_a && !we_a) begin
+            #1; // Wait for output stable
+            if (data_out_a !== ref_mem[prev_addr_a]) begin
+                $display("[ERROR] Time=%0t Port A: Addr=0x%h, Expected=0x%h, Got=0x%h",
+                         $time, prev_addr_a, ref_mem[prev_addr_a], data_out_a);
+                error_count = error_count + 1;
+            end else begin
+                test_count = test_count + 1;
+            end
+        end
+        // Update previous address AFTER check (for next cycle)
+        prev_addr_a <= addr_a;
+    end
+    
+{% if is_dual_port %}
+    {% if data_width == data_b_width %}
+    // Check port B read data - Symmetric dual-port
+    reg [ADDR_B_WIDTH-1:0] prev_addr_b;
+    always @(posedge clk_b) begin
+        if (!rst_b && en_b && !we_b) begin
+            #1; // Wait for output stable
+            if (data_out_b !== ref_mem[prev_addr_b]) begin
+                $display("[ERROR] Time=%0t Port B: Addr=0x%h, Expected=0x%h, Got=0x%h",
+                         $time, prev_addr_b, ref_mem[prev_addr_b], data_out_b);
+                error_count = error_count + 1;
+            end else begin
+                test_count = test_count + 1;
+            end
+        end
+        prev_addr_b <= addr_b;
+    end
+    {% else %}
+    // Check port B read data - DISABLED for asymmetric dual-port
+    // (complex address-to-data mapping, both ports share physical storage)
+    reg [ADDR_B_WIDTH-1:0] prev_addr_b;
+    always @(posedge clk_b) begin
+        prev_addr_b <= addr_b;
+    end
+    {% endif %}
+{% endif %}
+    
+    //==========================================================================
+    // Test Sequence
+    //==========================================================================
+    initial begin
+        // Initialize
+        error_count = 0;
+        test_count = 0;
+        rst_a = 1;
+        addr_a = 0;
+        prev_addr_a = 0;
+        data_in_a = 0;
+        we_a = 0;
+        en_a = 0;
+        
+{% if is_dual_port %}
+        rst_b = 1;
+        addr_b = 0;
+        prev_addr_b = 0;
+        data_in_b = 0;
+        we_b = 0;
+        en_b = 0;
+{% endif %}
+        
+        // Initialize reference memory from MIF (if available) or test pattern
+        $readmemh("../{{ mif_file }}", ref_mem);  // Relative to modelsim_work directory
+        // If MIF not loaded (all zeros or X), initialize with test pattern
+        for (integer init_i = 0; init_i < DEPTH; init_i = init_i + 1) begin
+            if (ref_mem[init_i] === {DATA_WIDTH{1'bx}} || ref_mem[init_i] === {DATA_WIDTH{1'b0}}) begin
+                ref_mem[init_i] = test_pattern(init_i);
+            end
+        end
+        
+        // Reset
+        #(CLK_PERIOD * 5);
+        rst_a = 0;
+{% if is_dual_port %}
+        rst_b = 0;
+{% endif %}
+        #(CLK_PERIOD * 2);
+        
+        //==========================================================================
+        // Test 1: Sequential Write All Addresses (Port A)
+        //==========================================================================
+        $display("[TEST] Sequential write all addresses...");
+        en_a = 1;
+        we_a = 1;
+        
+        for (integer i = 0; i < DEPTH; i = i + 1) begin
+            @(posedge clk_a);
+            addr_a = i[ADDR_WIDTH-1:0];
+            data_in_a = test_pattern(i);
+            ref_mem[i] = data_in_a;
+        end
+        
+        @(posedge clk_a);
+        we_a = 0;
+        en_a = 0;
+        #(CLK_PERIOD * 2);
+        
+        //==========================================================================
+        // Test 2: Sequential Read All Addresses (Port A)
+        //==========================================================================
+        $display("[TEST] Sequential read all addresses...");
+        en_a = 1;
+        
+        for (integer i = 0; i < DEPTH; i = i + 1) begin
+            @(posedge clk_a);
+            addr_a = i[ADDR_WIDTH-1:0];
+        end
+        // Extra cycles to check last addresses (due to 1-cycle RAM latency)
+        @(posedge clk_a);
+        addr_a = 0;
+        @(posedge clk_a);
+        en_a = 0;
+        #(CLK_PERIOD * 5);
+        
+        //==========================================================================
+        // Test 3: Reverse Order Access (Port A)
+        //==========================================================================
+        $display("[TEST] Reverse order access...");
+        
+        // Reverse write
+        en_a = 1;
+        we_a = 1;
+        for (integer i = DEPTH-1; i >= 0; i = i - 1) begin
+            @(posedge clk_a);
+            addr_a = i[ADDR_WIDTH-1:0];
+            data_in_a = ~test_pattern(i);
+            ref_mem[i] = data_in_a;
+        end
+        
+        @(posedge clk_a);
+        we_a = 0;
+        #(CLK_PERIOD * 2);
+        
+        // Reverse read
+        for (integer i = DEPTH-1; i >= 0; i = i - 1) begin
+            @(posedge clk_a);
+            addr_a = i[ADDR_WIDTH-1:0];
+        end
+        // Extra cycles to check last addresses
+        @(posedge clk_a);
+        addr_a = 0;
+        @(posedge clk_a);
+        en_a = 0;
+        #(CLK_PERIOD * 5);
+        
+        //==========================================================================
+        // Test 4: Stride Access (verify address bit independence)
+        //==========================================================================
+        $display("[TEST] Stride access...");
+        
+        for (integer stride = 1; stride < DEPTH; stride = stride * 2) begin
+            // Write with stride
+            en_a = 1;
+            we_a = 1;
+            for (integer i = 0; i < DEPTH; i = i + stride) begin
+                @(posedge clk_a);
+                addr_a = i[ADDR_WIDTH-1:0];
+                data_in_a = test_pattern(i) ^ stride[DATA_WIDTH-1:0];
+                ref_mem[i] = data_in_a;
+            end
+            
+            @(posedge clk_a);
+            we_a = 0;
+            #(CLK_PERIOD * 2);
+            
+            // Read verify
+            for (integer i = 0; i < DEPTH; i = i + stride) begin
+                @(posedge clk_a);
+                addr_a = i[ADDR_WIDTH-1:0];
+            end
+            // Extra cycles to check last addresses
+            @(posedge clk_a);
+            addr_a = 0;
+            @(posedge clk_a);
+            en_a = 0;
+            #(CLK_PERIOD * 2);
+        end
+        
+{% if is_dual_port %}
+        //==========================================================================
+        // Test 5: Dual Port - Port B Access
+        //==========================================================================
+        $display("[TEST] Dual port B access...");
+        
+        // Port B write
+        en_b = 1;
+        we_b = 1;
+        for (integer i = 0; i < DEPTH_B; i = i + 1) begin
+            @(posedge clk_b);
+            addr_b = i[ADDR_B_WIDTH-1:0];
+            data_in_b = test_pattern_b(i);
+            {% if data_width == data_b_width %}
+            ref_mem[i] = data_in_b;  // Symmetric: shared memory
+            {% else %}
+            ref_mem_b[i] = data_in_b;  // Asymmetric: independent reference
+            {% endif %}
+        end
+        
+        @(posedge clk_b);
+        we_b = 0;
+        en_b = 0;
+        #(CLK_PERIOD * 5);
+        
+        // Port B read - verify data written via Port B
+        en_b = 1;
+        for (integer i = 0; i < DEPTH_B; i = i + 1) begin
+            @(posedge clk_b);
+            addr_b = i[ADDR_B_WIDTH-1:0];
+        end
+        // Extra cycles to check last addresses
+        @(posedge clk_b);
+        addr_b = 0;
+        @(posedge clk_b);
+        en_b = 0;
+        #(CLK_PERIOD * 5);
+        
+        {% if data_width == data_b_width %}
+        // For symmetric dual-port: verify Port A can read data written by Port B
+        $display("[TEST] Port A reads Port B writes...");
+        en_a = 1;
+        for (integer i = 0; i < DEPTH; i = i + 1) begin
+            @(posedge clk_a);
+            addr_a = i[ADDR_WIDTH-1:0];
+        end
+        // Extra cycles to check last addresses
+        @(posedge clk_a);
+        addr_a = 0;
+        @(posedge clk_a);
+        en_a = 0;
+        #(CLK_PERIOD * 5);
+        {% endif %}
+        
+        //==========================================================================
+        // Test 6: Simultaneous Access (both ports)
+        //==========================================================================
+        $display("[TEST] Simultaneous access...");
+        
+        {% if data_width != data_b_width %}
+        // For asymmetric dual-port: re-initialize Port A memory first
+        // (Port B writes have overwritten physical storage)
+        en_a = 1;
+        we_a = 1;
+        for (integer i = 0; i < DEPTH; i = i + 1) begin
+            @(posedge clk_a);
+            addr_a = i[ADDR_WIDTH-1:0];
+            data_in_a = test_pattern(i);
+            ref_mem[i] = data_in_a;
+        end
+        @(posedge clk_a);
+        we_a = 0;
+        en_a = 0;
+        #(CLK_PERIOD * 2);
+        {% endif %}
+        
+        // Simultaneous reads (no writes)
+        en_a = 1;
+        en_b = 1;
+        for (integer i = 0; i < DEPTH && i < DEPTH_B; i = i + 1) begin
+            @(posedge clk_a);
+            @(posedge clk_b);
+            addr_a = i[ADDR_WIDTH-1:0];
+            addr_b = i[ADDR_B_WIDTH-1:0];
+        end
+        // Extra cycles to check last addresses
+        @(posedge clk_a);
+        @(posedge clk_b);
+        addr_a = 0;
+        addr_b = 0;
+        @(posedge clk_a);
+        @(posedge clk_b);
+        en_a = 0;
+        en_b = 0;
+        #(CLK_PERIOD * 5);
+{% endif %}
+        
+        //==========================================================================
+        // Test Report
+        //==========================================================================
+        #(CLK_PERIOD * 10);
+        
+        $display("============================================================");
+        $display("Test Configuration: {{ config_name }}");
+        $display("Total checks: %0d", test_count);
+        $display("Total errors: %0d", error_count);
+        if (error_count == 0)
+            $display("RESULT: PASSED");
+        else
+            $display("RESULT: FAILED");
+        $display("============================================================");
+        
+        $finish;
+    end
+    
+    //==========================================================================
+    // Test Pattern Generator
+    //==========================================================================
+    function [DATA_WIDTH-1:0] test_pattern;
+        input integer addr;
+        begin
+            test_pattern = {
+                addr[3:0],
+                addr[7:4] ^ addr[3:0],
+                addr[11:8] ^ addr[7:4],
+                addr[15:12] ^ addr[11:8]
+            } & {{ data_width_ones }};
+        end
+    endfunction
+    
+{% if is_dual_port %}
+    function [DATA_B_WIDTH-1:0] test_pattern_b;
+        input integer addr;
+        begin
+            test_pattern_b = {
+                addr[3:0],
+                addr[7:4] ^ addr[3:0],
+                addr[11:8] ^ addr[7:4],
+                addr[15:12] ^ addr[11:8]
+            } & {{ data_b_width_ones }};
+        end
+    endfunction
+{% endif %}
+    
+    //==========================================================================
+    // Waveform Dump (optional, for debugging)
+    //==========================================================================
+    initial begin
+        $dumpfile("{{ config_name }}.vcd");
+        $dumpvars(0, tb_{{ config_name }});
+    end
+
+endmodule

@@ -1,0 +1,17 @@
+{% if is_dual_port %}
+WIDTHA={{ width_a }};
+DEPTHA={{ depth_a }};
+WIDTHB={{ width_b }};
+DEPTHB={{ depth_b }};
+{% else %}
+WIDTH={{ width }};
+DEPTH={{ depth }};
+{% endif %}
+ADDRESS_RADIX=HEX;
+DATA_RADIX=HEX;
+
+CONTENT BEGIN
+{% for item in data %}
+	{{ "%X"|format(item.addr) }} : {{ item.value }};
+{% endfor %}
+END;
