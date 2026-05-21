@@ -34,7 +34,8 @@ struct TestResult {
 // Encapsulates 4 test strategies matching tb_test.sv logic
 class RamTestExecutor {
 public:
-    RamTestExecutor(PinMapping& pin_map, UsbDriver& usb, int width, int depth);
+    RamTestExecutor(PinMapping& pin_map, UsbDriver& usb, int width, int depth,
+                     int width_b = 0, int depth_b = 0);
 
     std::vector<TestResult> runAllTests();
 
@@ -42,9 +43,12 @@ public:
     TestResult test2ReverseWriteRead();
     TestResult test3StrideAccess();
     TestResult test4RandomAccess();
+    TestResult test5PortAWritePortBRead();
+    TestResult test6PortBWritePortARead();
 
     void setPrintInterval(int n) { print_interval_ = n; }
     void setFrequency(int freq);
+    void setDualPort(bool enable);
 
 private:
     PinMapping& pin_map_;
@@ -53,13 +57,27 @@ private:
     int depth_;
     int addr_width_;
     int print_interval_;
+    int width_b_;
+    int depth_b_;
+    int addr_width_b_;
+    bool is_dual_port_ = false;
 
     uint64_t buildWriteData(int ena, int wea, int addr, uint32_t data_in);
+    uint64_t buildWriteDataAB(int ena, int wea, int addr_a, uint32_t data_in_a,
+                               int enb, int web, int addr_b, uint32_t data_in_b);
     uint32_t extractReadData(uint64_t read_data);
+    uint32_t extractReadDataA(uint64_t read_data);
+    uint32_t extractReadDataB(uint64_t read_data);
     void ramWrite(int addr, uint32_t data);
     uint32_t ramRead(int addr);
+    void ramWriteA(int addr, uint32_t data);
+    void ramWriteB(int addr, uint32_t data);
+    uint32_t ramReadA(int addr);
+    uint32_t ramReadB(int addr);
     void reportError(TestResult& result, int test_id, int addr,
                      uint32_t expected, uint32_t actual, const char* desc);
+    bool hasPortB() const;
+    bool isSymmetricDualPort() const;
 };
 
 } // namespace hw_test

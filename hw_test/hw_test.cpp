@@ -26,6 +26,7 @@ void printUsage(const char* prog) {
     printf("  -b <bitfile>  Specify bitstream file (default: <config_dir>/top_yosys_bit.bit)\n");
     printf("  -t <test>     Run specific test only (1-4, default: all)\n");
     printf("  -i <interval> Print progress every N addresses (default: 100, 0=disable)\n");
+    printf("  -d            Enable dual-port tests (Test 5/6)\n");
     printf("  -v            Verbose: print pin mapping\n");
     printf("  -h            Show this help\n");
     printf("\n");
@@ -34,6 +35,8 @@ void printUsage(const char* prog) {
     printf("  2: Reverse order write/read\n");
     printf("  3: Stride access\n");
     printf("  4: Random access\n");
+    printf("  5: Port A write -> Port B read (dual-port only)\n");
+    printf("  6: Port B write -> Port A read (dual-port only)\n");
     printf("\n");
     printf("Examples:\n");
     printf("  %s test/4x2048\n", prog);
@@ -93,23 +96,48 @@ void printReport(const std::vector<TestResult>& results) {
 // Infer width/depth from config directory name
 // ============================================================================
 
-bool inferConfig(const fs::path& config_dir, int& width, int& depth) {
+bool inferConfig(const fs::path& config_dir, int& width, int& depth,
+                 int& width_b, int& depth_b) {
     std::string name = config_dir.filename().string();
+    width_b = 0;
+    depth_b = 0;
 
-    // Try parsing "4x2048" format
+    // Try parsing "4x2048_8x1024" format (dual-port)
+    size_t under_pos = name.find('_');
+    if (under_pos != std::string::npos) {
+        std::string part_a = name.substr(0, under_pos);
+        std::string part_b = name.substr(under_pos + 1);
+        size_t x_pos_a = part_a.find('x');
+        size_t x_pos_b = part_b.find('x');
+        if (x_pos_a != std::string::npos && x_pos_b != std::string::npos) {
+            try {
+                width = std::stoi(part_a.substr(0, x_pos_a));
+                depth = std::stoi(part_a.substr(x_pos_a + 1));
+                width_b = std::stoi(part_b.substr(0, x_pos_b));
+                depth_b = std::stoi(part_b.substr(x_pos_b + 1));
+                printf("[INFO] Inferred dual-port config: A=%dx%d, B=%dx%d\n",
+                       width, depth, width_b, depth_b);
+                return true;
+            } catch (...) {
+                // parsing failed, try next method
+            }
+        }
+    }
+
+    // Try parsing "4x2048" format (single-port)
     size_t x_pos = name.find('x');
     if (x_pos != std::string::npos) {
         try {
             width = std::stoi(name.substr(0, x_pos));
             depth = std::stoi(name.substr(x_pos + 1));
-            printf("[INFO] Inferred config from dir name: width=%d, depth=%d\n", width, depth);
+            printf("[INFO] Inferred single-port config: width=%d, depth=%d\n", width, depth);
             return true;
         } catch (...) {
             // parsing failed, try next method
         }
     }
 
-    // Try parsing from test.v
+    // Try parsing from test.v (single-port fallback)
     fs::path test_v = config_dir / "test.v";
     if (fs::exists(test_v)) {
         FILE* f = fopen(test_v.string().c_str(), "r");
@@ -140,7 +168,7 @@ bool inferConfig(const fs::path& config_dir, int& width, int& depth) {
     }
 
     fprintf(stderr, "[ERROR] Cannot infer width/depth from config dir: %s\n", name.c_str());
-    fprintf(stderr, "        Please use directory name like '4x2048' or specify manually.\n");
+    fprintf(stderr, "        Please use directory name like '4x2048' or '4x2048_8x1024'.\n");
     return false;
 }
 
@@ -155,6 +183,7 @@ int main(int argc, char** argv) {
     int specific_test = 0; // 0 = all
     int print_interval = 100;
     bool verbose = false;
+    bool dual_port = false;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -168,6 +197,8 @@ int main(int argc, char** argv) {
             specific_test = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
             print_interval = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--dual-port") == 0) {
+            dual_port = true;
         } else if (strcmp(argv[i], "-v") == 0) {
             verbose = true;
         } else if (argv[i][0] != '-') {
@@ -191,8 +222,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    int width = 0, depth = 0;
-    if (!inferConfig(config_path, width, depth)) {
+    int width = 0, depth = 0, width_b = 0, depth_b = 0;
+    if (!inferConfig(config_path, width, depth, width_b, depth_b)) {
         return 1;
     }
 
@@ -219,9 +250,12 @@ int main(int argc, char** argv) {
     printf("Config dir:  %s\n", config_dir.c_str());
     printf("Bitstream:   %s\n", bitfile_path.c_str());
     printf("Constraint:  %s\n", cons_path.string().c_str());
-    printf("Width:       %d bits\n", width);
-    printf("Depth:       %d words\n", depth);
+    printf("Port A:      %d bits x %d words\n", width, depth);
+    if (width_b > 0 && depth_b > 0) {
+        printf("Port B:      %d bits x %d words\n", width_b, depth_b);
+    }
     printf("Frequency:   %d Hz\n", frequency);
+    printf("Dual-port:   %s\n", dual_port ? "enabled" : "disabled");
     printf("Print interval: %d\n", print_interval);
     printf("============================================================\n");
 
@@ -256,9 +290,10 @@ int main(int argc, char** argv) {
     }
 
     printf("[4/4] Running tests...\n");
-    RamTestExecutor executor(pin_map, usb, width, depth);
+    RamTestExecutor executor(pin_map, usb, width, depth, width_b, depth_b);
     executor.setFrequency(frequency);
     executor.setPrintInterval(print_interval);
+    executor.setDualPort(dual_port);
 
     std::vector<TestResult> results;
 
@@ -267,6 +302,8 @@ int main(int argc, char** argv) {
         case 2: results.push_back(executor.test2ReverseWriteRead()); break;
         case 3: results.push_back(executor.test3StrideAccess()); break;
         case 4: results.push_back(executor.test4RandomAccess()); break;
+        case 5: results.push_back(executor.test5PortAWritePortBRead()); break;
+        case 6: results.push_back(executor.test6PortBWritePortARead()); break;
         default: results = executor.runAllTests(); break;
     }
 

@@ -313,6 +313,35 @@ class TestFileGenerator:
         
         port_mappings = []
         
+        # Calculate required pins before allocation
+        required_input = 2  # ena, wea
+        required_output = config.width  # data_out_a
+        
+        if config.is_dual_port:
+            required_input += 2  # enb, web
+            required_input += config.addr_width  # addr_a
+            required_input += config.width  # data_in_a
+            required_input += config.addr_b_width  # addr_b
+            width_b = config.width_b or 0
+            required_input += width_b  # data_in_b
+            required_output += width_b  # data_out_b
+        else:
+            required_input += config.addr_width  # addr_a
+            required_input += config.width  # data_in_a
+        
+        if len(input_pins) < required_input:
+            raise ValueError(
+                f"[{config.name}] Insufficient input pins: "
+                f"need {required_input}, available {len(input_pins)} "
+                f"(missing {required_input - len(input_pins)} input pin(s))"
+            )
+        if len(output_pins) < required_output:
+            raise ValueError(
+                f"[{config.name}] Insufficient output pins: "
+                f"need {required_output}, available {len(output_pins)} "
+                f"(missing {required_output - len(output_pins)} output pin(s))"
+            )
+        
         # Clock - use dedicated clock pin P77
         # The D-flipflop in wrapper ensures proper clock network insertion
         port_mappings.append(f'  <port name="clk" position="{clock_pin}"/>')
@@ -386,11 +415,41 @@ class TestFileGenerator:
         with open(constraint_path, 'w', encoding='utf-8') as f:
             f.write(xml_content)
     
+    def _check_pin_feasibility(self, config: RamConfig) -> Optional[str]:
+        """Check if the device has enough pins for this config.
+        Returns an error message if infeasible, otherwise None."""
+        device = 'FDP3P7'
+        pins = DEVICE_PINS[device]
+        input_pins = pins['input']
+        output_pins = pins['output']
+        
+        required_input = 2  # ena, wea
+        required_output = config.width  # data_out_a
+        
+        if config.is_dual_port:
+            required_input += 2  # enb, web
+            required_input += config.addr_width
+            required_input += config.width
+            required_input += config.addr_b_width
+            width_b = config.width_b or 0
+            required_input += width_b
+            required_output += width_b
+        else:
+            required_input += config.addr_width
+            required_input += config.width
+        
+        if len(input_pins) < required_input:
+            return f"input pins shortage (need {required_input}, have {len(input_pins)})"
+        if len(output_pins) < required_output:
+            return f"output pins shortage (need {required_output}, have {len(output_pins)})"
+        return None
+    
     def generate_all_tests(self) -> dict:
         stats = {
             'total': 0,
             'single_port': 0,
             'dual_port': 0,
+            'skipped': 0,
             'generated': []
         }
         
@@ -406,16 +465,31 @@ class TestFileGenerator:
                 is_dual_port=False
             )
             
-            mif_path, tb_path = self.generate_single_test(config)
-            print(f"  {config.name:12s} -> {mif_path.parent}")
+            reason = self._check_pin_feasibility(config)
+            if reason:
+                print(f"  [SKIP] {config.name:12s} -> {reason}")
+                stats['skipped'] += 1
+                continue
             
-            stats['single_port'] += 1
-            stats['total'] += 1
-            stats['generated'].append({
-                'name': config.name,
-                'type': 'single',
-                'dir': str(mif_path.parent)
-            })
+            try:
+                mif_path, tb_path = self.generate_single_test(config)
+                print(f"  [OK]   {config.name:12s} -> {mif_path.parent}")
+                
+                stats['single_port'] += 1
+                stats['total'] += 1
+                stats['generated'].append({
+                    'name': config.name,
+                    'type': 'single',
+                    'dir': str(mif_path.parent)
+                })
+            except ValueError as e:
+                print(f"  [SKIP] {config.name:12s} -> {e}")
+                stats['skipped'] += 1
+                # Clean up partially created directory
+                test_dir = self.base_dir / config.name
+                if test_dir.exists():
+                    import shutil
+                    shutil.rmtree(test_dir)
         
         print("\n[Dual Port Configurations]")
         for width_a, depth_a, width_b, depth_b in _VALID_DUAL_PORT:
@@ -428,24 +502,40 @@ class TestFileGenerator:
                 depth_b=depth_b
             )
             
-            mif_path, tb_path = self.generate_single_test(config)
-            print(f"  {config.name:12s} -> {mif_path.parent}")
+            reason = self._check_pin_feasibility(config)
+            if reason:
+                print(f"  [SKIP] {config.name:12s} -> {reason}")
+                stats['skipped'] += 1
+                continue
             
-            stats['dual_port'] += 1
-            stats['total'] += 1
-            stats['generated'].append({
-                'name': config.name,
-                'type': 'dual',
-                'dir': str(mif_path.parent),
-                'port_a': f"{depth_a}X{width_a}",
-                'port_b': f"{depth_b}X{width_b}"
-            })
+            try:
+                mif_path, tb_path = self.generate_single_test(config)
+                print(f"  [OK]   {config.name:12s} -> {mif_path.parent}")
+                
+                stats['dual_port'] += 1
+                stats['total'] += 1
+                stats['generated'].append({
+                    'name': config.name,
+                    'type': 'dual',
+                    'dir': str(mif_path.parent),
+                    'port_a': f"{depth_a}X{width_a}",
+                    'port_b': f"{depth_b}X{width_b}"
+                })
+            except ValueError as e:
+                print(f"  [SKIP] {config.name:12s} -> {e}")
+                stats['skipped'] += 1
+                # Clean up partially created directory
+                test_dir = self.base_dir / config.name
+                if test_dir.exists():
+                    import shutil
+                    shutil.rmtree(test_dir)
         
         print("\n" + "=" * 60)
         print(f"Generation complete!")
-        print(f"  Total: {stats['total']}")
+        print(f"  Generated:   {stats['total']}")
+        print(f"  Skipped:     {stats['skipped']}")
         print(f"  Single-port: {stats['single_port']}")
-        print(f"  Dual-port: {stats['dual_port']}")
+        print(f"  Dual-port:   {stats['dual_port']}")
         
         return stats
     

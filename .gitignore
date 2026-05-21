@@ -1,2 +1,4 @@
 test/
 vlfd-ffi/
+_pycache_/
+.xmake/
